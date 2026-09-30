@@ -7,6 +7,7 @@ usage: python3 make_video.py [--preview]
 """
 import math
 import sys
+from multiprocessing import Pool, cpu_count
 
 import imageio.v2 as imageio
 import numpy as np
@@ -240,8 +241,10 @@ def draw_figure(img, j, view, hl, pulse):
             a, b = ids[s]
             w = (torso_w if s == "torso" else near_w) + 16 + 6 * pulse
             line(g, j[a], j[b], RED + (alpha,), w)
-    glow = glow.filter(ImageFilter.GaussianBlur(8 * SS))
-    img.alpha_composite(glow)
+    # 縮小してからぼかすと高速
+    small = glow.resize((img.size[0] // 8, img.size[1] // 8), Image.BILINEAR)
+    small = small.filter(ImageFilter.GaussianBlur(SS))
+    img.alpha_composite(small.resize(img.size, Image.BILINEAR))
     d = ImageDraw.Draw(img)
     for s in hl:
         if s.startswith("j:"):
@@ -563,31 +566,58 @@ def main():
 
     all_seqs = [ex_frames(ex) for ex in EXERCISES]
     total = sum(len(s) for s in all_seqs)
+    jobs, done = [], 0
+    for i, seq in enumerate(all_seqs, 1):
+        for f, (j, cap, hl) in enumerate(seq):
+            done += 1
+            jobs.append((i, f, j, cap, hl, done / total))
     writer = imageio.get_writer("badminton_mobility_stretch.mp4", fps=FPS, codec="libx264",
                                 quality=8, macro_block_size=16,
                                 ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"])
     still = finalize(intro_card())
     for _ in range(int(7 * FPS)):
         writer.append_data(still)
-    done = 0
-    for i, (ex, seq) in enumerate(zip(EXERCISES, all_seqs), 1):
-        still = finalize(next_card(i, ex))
-        for _ in range(int(1.8 * FPS)):
-            writer.append_data(still)
-        bg = Image.new("RGBA", (W * SS, H * SS), BG + (255,))
-        draw_props(ImageDraw.Draw(bg), ex["props"])
-        for f, (j, cap, hl) in enumerate(seq):
-            img = bg.copy()
-            pulse = 0.5 + 0.5 * math.sin(f / FPS * 2 * math.pi * 0.8)
-            draw_figure(img, j, ex["view"], hl, pulse)
-            done += 1
-            draw_panel(img, ex, i, len(EXERCISES), cap, done / total)
-            writer.append_data(finalize(img))
-        print(f"exercise {i} done", flush=True)
+    with Pool(cpu_count()) as pool:
+        cur = 0
+        for n, (i, frame) in enumerate(pool.imap(render_job, jobs, chunksize=16)):
+            if i != cur:
+                cur = i
+                print(f"exercise {i} start", flush=True)
+                still = finalize(next_card(i, EXERCISES[i - 1]))
+                for _ in range(int(1.8 * FPS)):
+                    writer.append_data(still)
+            writer.append_data(frame)
     still = finalize(outro_card())
     for _ in range(int(7 * FPS)):
         writer.append_data(still)
     writer.close()
+    print("DONE", flush=True)
+
+
+_cache = {}
+
+
+def render_job(job):
+    i, f, j, cap, hl, prog = job
+    ex = EXERCISES[i - 1]
+    key = (i, cap)
+    if key not in _cache:
+        _cache.clear()
+        bg = Image.new("RGBA", (W * SS, H * SS), BG + (255,))
+        draw_props(ImageDraw.Draw(bg), ex["props"])
+        panel = Image.new("RGBA", (W * SS, H * SS), (0, 0, 0, 0))
+        draw_panel(panel, ex, i, len(EXERCISES), cap, 0)
+        _cache[key] = (bg, panel)
+    bg, panel = _cache[key]
+    img = bg.copy()
+    pulse = 0.5 + 0.5 * math.sin(f / FPS * 2 * math.pi * 0.8)
+    draw_figure(img, j, ex["view"], hl, pulse)
+    img.alpha_composite(panel)
+    out = img.convert("RGB").resize((W, H), Image.BOX)
+    d = ImageDraw.Draw(out)
+    d.rectangle([0, H - 10, W, H], fill=(225, 220, 210))
+    d.rectangle([0, H - 10, int(W * prog), H], fill=RED)
+    return i, np.asarray(out)
 
 
 if __name__ == "__main__":
