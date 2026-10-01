@@ -268,7 +268,7 @@ class Scene:
                 o["joint"] = h[2:]
                 self.joint_marks.append(o)
             else:
-                scale = 1.22 if h == "torso" else 1.45
+                scale = 1.12 if h == "torso" else 1.45
                 self.hl_parts[h] = SkinPart("hl_" + h, HL_E[h], scale, self.m_red)
 
     def pose(self, j, view, pulse):
